@@ -1,0 +1,40 @@
+name: Sync canonical main to GitLab
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: deploydock-gitlab-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ github.ref == 'refs/heads/main' && vars.GITLAB_REPOSITORY_URL != '' }}
+    runs-on: ubuntu-24.04
+    env:
+      GITLAB_REPOSITORY_URL: ${{ vars.GITLAB_REPOSITORY_URL }}
+      GITLAB_PUSH_TOKEN: ${{ secrets.GITLAB_PUSH_TOKEN }}
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - name: Fast-forward GitLab from GitHub main
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GITLAB_PUSH_TOKEN:?Set the GitLab repository-write token}"
+          [[ "$GITLAB_REPOSITORY_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._-]+)+\.git$ ]]
+          scratch=$(mktemp -d)
+          trap 'rm -rf -- "$scratch"' EXIT
+          cat > "$scratch/askpass" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf 'oauth2\n' ;;
+            *Password*) printf '%s\n' "$GITLAB_PUSH_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod 0700 "$scratch/askpass"
+          git clone --single-branch --branch main --no-tags "https://github.com/$GITHUB_REPOSITORY.git" "$scratch/source"
+          GIT_ASKPASS="$scratch/askpass" git -C "$scratch/source" -c credential.helper= -c http.followRedirects=false \
+            push "$GITLAB_REPOSITORY_URL" refs/heads/main:refs/heads/main

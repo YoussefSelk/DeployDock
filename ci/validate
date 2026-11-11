@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
+
+shopt -s globstar nullglob
+shell_scripts=(scripts/* ci/validate ci/deploy tests/**/*.sh)
+shellcheck "${shell_scripts[@]}"
+for script in "${shell_scripts[@]}"; do bash -n "$script"; done
+node --check app/frontend/app.js
+docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+(
+    cd infra/ansible
+    ansible-galaxy collection install -r requirements.yml
+    ansible-playbook --syntax-check playbooks/provision.yml
+    ansible-playbook --syntax-check playbooks/deploy.yml
+    ansible-lint playbooks roles
+)

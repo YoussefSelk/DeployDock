@@ -1,0 +1,119 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true" && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api")'
+    - when: never
+
+stages: [validate, test, build, integration, publish, staging, production]
+
+default:
+  tags: [deploydock-linux]
+  interruptible: true
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  CI_WEB_TAG: "deploydock-ci/web:$CI_PIPELINE_ID"
+  CI_API_TAG: "deploydock-ci/api:$CI_PIPELINE_ID"
+
+.python_job:
+  cache:
+    key:
+      files: [app/backend/requirements.txt, ci/lint-requirements.txt]
+    paths: [.cache/pip/]
+  before_script:
+    - python3 -m venv .venv
+    - source .venv/bin/activate
+
+quality:
+  extends: .python_job
+  stage: validate
+  script:
+    - pip install -q -r ci/lint-requirements.txt
+    - ci/validate
+
+unit:
+  extends: .python_job
+  stage: test
+  script:
+    - pip install -q --require-hashes --only-binary=:all: -r app/backend/requirements.txt
+    - PYTHONPATH=app/backend python -m unittest discover -s tests/unit
+    - bash tests/unit/test_release.sh
+
+build_images:
+  stage: build
+  script:
+    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$CI_WEB_TAG" -f app/frontend/Dockerfile .
+    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$CI_API_TAG" -f app/backend/Dockerfile .
+    - set -o pipefail
+    - docker image save "$CI_WEB_TAG" "$CI_API_TAG" | gzip -1 > images.tar.gz
+  after_script:
+    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" || true
+  artifacts:
+    paths: [images.tar.gz]
+    expire_in: 1 day
+
+integration:
+  stage: integration
+  needs: [build_images]
+  script:
+    - docker image load -i images.tar.gz
+    - tests/integration/release.sh "$CI_WEB_TAG" "$CI_API_TAG"
+  after_script:
+    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" || true
+
+publish:
+  stage: publish
+  needs:
+    - job: build_images
+      artifacts: true
+    - job: integration
+      artifacts: false
+  script:
+    - |
+      set -euo pipefail
+      : "${CI_REGISTRY_IMAGE:?Enable the GitLab container registry}"
+      export DOCKER_CONFIG
+      DOCKER_CONFIG=$(mktemp -d /tmp/deploydock-registry.XXXXXXXX)
+      trap 'rm -f -- "$DOCKER_CONFIG/config.json"; rmdir -- "$DOCKER_CONFIG"' EXIT
+      release="$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+      web_tag="$CI_REGISTRY_IMAGE/web:$release"
+      api_tag="$CI_REGISTRY_IMAGE/api:$release"
+      docker image load -i images.tar.gz
+      docker tag "$CI_WEB_TAG" "$web_tag"
+      docker tag "$CI_API_TAG" "$api_tag"
+      printf '%s' "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+      web=$(scripts/push-image "$web_tag")
+      api=$(scripts/push-image "$api_tag")
+      printf 'RELEASE_ID=%s\nWEB_IMAGE=%s\nAPI_IMAGE=%s\n' "$release" "$web" "$api" > release.env
+  after_script:
+    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" "$CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHA-$CI_PIPELINE_ID" "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHA-$CI_PIPELINE_ID" || true
+  artifacts:
+    reports:
+      dotenv: release.env
+    expire_in: 30 days
+
+.deploy:
+  extends: .python_job
+  interruptible: false
+  script:
+    - pip install -q -r ci/controller-requirements.txt
+    - ci/deploy
+
+staging:
+  extends: .deploy
+  stage: staging
+  needs: [publish]
+  resource_group: deploydock-staging
+  environment: staging
+  rules:
+    - if: '$DEPLOYDOCK_STAGING_ENABLED == "true"'
+
+production:
+  extends: .deploy
+  stage: production
+  needs: [publish, staging]
+  resource_group: deploydock-production
+  environment: production
+  rules:
+    - if: '$DEPLOYDOCK_STAGING_ENABLED == "true" && $DEPLOYDOCK_PRODUCTION_ENABLED == "true"'
+      when: manual
+      allow_failure: false

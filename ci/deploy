@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
+umask 077
+
+: "${DEPLOY_HOST:?Configure DEPLOY_HOST for this environment}"
+: "${DEPLOY_SSH_PRIVATE_KEY:?Configure the protected file variable DEPLOY_SSH_PRIVATE_KEY}"
+: "${DEPLOY_SSH_KNOWN_HOSTS:?Configure the protected file variable DEPLOY_SSH_KNOWN_HOSTS}"
+: "${RELEASE_ID:?Missing release artifact}"
+: "${WEB_IMAGE:?Missing web digest}"
+: "${API_IMAGE:?Missing API digest}"
+ssh_port=${DEPLOY_SSH_PORT:-22}
+ssh_user=${DEPLOY_SSH_USER:-deploydock}
+[[ $DEPLOY_HOST =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}$ &&
+    $ssh_port =~ ^[1-9][0-9]{0,4}$ && $ssh_port -le 65535 &&
+    $ssh_user =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || {
+    printf 'Invalid deployment host, SSH user or port. Use a DNS name or IPv4 address.\n' >&2
+    exit 64
+}
+scratch=$(mktemp -d /tmp/deploydock-ci.XXXXXXXX)
+cleanup() {
+    rm -f -- "$scratch/key" "$scratch/known_hosts" "$scratch/inventory" "$scratch/release.json"
+    rmdir -- "$scratch"
+}
+trap cleanup EXIT
+install -m 0600 "$DEPLOY_SSH_PRIVATE_KEY" "$scratch/key"
+install -m 0600 "$DEPLOY_SSH_KNOWN_HOSTS" "$scratch/known_hosts"
+printf '[deploydock]\ntarget ansible_host=%s ansible_port=%s ansible_user=%s\n'     "$DEPLOY_HOST" "$ssh_port" "$ssh_user" > "$scratch/inventory"
+jq -n --arg release "$RELEASE_ID" --arg web "$WEB_IMAGE" --arg api "$API_IMAGE"     '{deploydock_release:$release,deploydock_web_image:$web,deploydock_api_image:$api}' > "$scratch/release.json"
+
+cd infra/ansible
+ansible-playbook -i "$scratch/inventory" --private-key "$scratch/key"     --ssh-common-args "-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$scratch/known_hosts"     -e "@$scratch/release.json" playbooks/deploy.yml
