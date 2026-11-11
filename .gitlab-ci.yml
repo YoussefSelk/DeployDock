@@ -32,7 +32,7 @@ unit:
   extends: .python_job
   stage: test
   script:
-    - pip install -q --require-hashes --only-binary=:all: -r app/backend/requirements.txt
+    - 'pip install -q --require-hashes --only-binary=:all: -r app/backend/requirements.txt'
     - PYTHONPATH=app/backend python -m unittest discover -s tests/unit
     - bash tests/unit/test_release.sh
 
