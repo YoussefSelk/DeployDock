@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeployDock</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>DeployDock</h1>
+      <dl>
+        <div><dt>Environment</dt><dd id="environment">Loading</dd></div>
+        <div><dt>Release</dt><dd id="release">Loading</dd></div>
+        <div><dt>Readiness</dt><dd id="readiness" class="status" aria-live="polite">Checking</dd></div>
+      </dl>
+    </header>
+    <section aria-labelledby="notes-heading">
+      <h2 id="notes-heading">Notes</h2>
+      <form id="note-form">
+        <label for="note-text">New note</label>
+        <div class="controls">
+          <input id="note-text" name="text" maxlength="240" required>
+          <button type="submit">Save note</button>
+        </div>
+      </form>
+      <p id="feedback" role="status"></p>
+      <p id="note-state">Loading notes…</p>
+      <ul id="notes"></ul>
+    </section>
+  </main>
+</body>
+</html>

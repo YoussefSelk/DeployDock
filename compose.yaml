@@ -1,0 +1,75 @@
+services:
+  web:
+    image: ${WEB_IMAGE:-deploydock/web:local}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    networks: [edge]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health/ready"]
+      interval: 5s
+      timeout: 4s
+      retries: 6
+    restart: unless-stopped
+    mem_limit: 96m
+    pids_limit: 32
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  api:
+    image: ${API_IMAGE:-deploydock/api:local}
+    environment:
+      RELEASE_ID: ${RELEASE_ID:-dev}
+      APP_ENV: ${APP_ENV:-local}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [edge, data]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 64
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  db:
+    image: postgres:17-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
+    environment:
+      POSTGRES_DB: deploydock
+      POSTGRES_USER: deploydock
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - data:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U deploydock -d deploydock"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+
+networks:
+  edge: {}
+  data:
+    internal: true
+volumes:
+  data: {}
+secrets:
+  db_password:
+    file: ${DB_PASSWORD_FILE:-./secrets/db_password}
