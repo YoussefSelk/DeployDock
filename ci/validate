@@ -7,7 +7,11 @@ shell_scripts=(scripts/* ci/validate ci/deploy tests/**/*.sh)
 shellcheck "${shell_scripts[@]}"
 for script in "${shell_scripts[@]}"; do bash -n "$script"; done
 node --check app/frontend/app.js
-docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+docker compose -f compose.yaml -f compose.dev.yaml config --format json |
+    jq -e '(.services.web.ports | length == 1 and .[0].host_ip == "127.0.0.1") and
+        (.services.api.ports // [] | length == 0) and
+        (.services.db.ports // [] | length == 0) and
+        .networks.data.internal' >/dev/null
 (
     cd infra/ansible
     ansible-galaxy collection install -r requirements.yml
