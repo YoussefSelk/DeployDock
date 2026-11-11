@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+root=${DEPLOYDOCK_ROOT:-/opt/deploydock}
+smoke="$(dirname -- "${BASH_SOURCE[0]}")/smoke"
+operation=${1:-help}
+stage=''
+current=-
+previous=-
+pending=-
+
+log() { printf '[deploydock] %s\n' "$*" >&2; }
+die() {
+    local code=$1
+    shift
+    log "$*"
+    exit "$code"
+}
+usage() {
+    cat <<'EOF'
+Usage:
+  deploydock check-host
+  deploydock deploy COMPOSE_FILE RELEASE WEB_IMAGE@sha256:... API_IMAGE@sha256:...
+  deploydock verify [EXPECTED_RELEASE]
+  deploydock status
+  deploydock logs
+  deploydock rollback
+  deploydock recover
+EOF
+}
+valid_id() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$ ]]; }
+valid_image() { [[ $1 =~ ^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$ ]]; }
+cleanup() {
+    if [[ -n $stage ]]; then
+        rm -f -- "$stage/compose.yaml" "$stage/images"
+        rmdir -- "$stage"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ $operation == help || $operation == --help ]]; then
+    usage
+    exit 0
+fi
+shift
+case "$operation" in
+    deploy)
+        [[ $# == 4 ]] || die 64 'deploy requires Compose file, release ID and two image references'
+        [[ -f $1 && -r $1 ]] || die 64 'Compose file is missing or unreadable'
+        valid_id "$2" || die 64 'Invalid release ID'
+        valid_image "$3" && valid_image "$4" || die 64 'Images must be digest-qualified'
+        ;;
+    verify)
+        [[ $# -le 1 ]] || die 64 'verify accepts at most one release ID'
+        if [[ $# == 1 ]]; then valid_id "$1" || die 64 'Invalid release ID'; fi
+        ;;
+    status|logs|rollback|recover|check-host)
+        [[ $# == 0 ]] || die 64 "$operation takes no arguments"
+        ;;
+    *) usage >&2; die 64 "Unknown command: $operation" ;;
+esac
+
+[[ $root == /* && -d $root && -r $root/host.env ]] || die 78 'Configure an absolute deployment root with host.env'
+for command in docker flock curl jq timeout sync; do
+    command -v "$command" >/dev/null || die 69 "Missing command: $command"
+done
+
+# shellcheck source=/dev/null
+source "$root/host.env"
+[[ ${PROJECT:-} =~ ^[a-z0-9][a-z0-9_-]{0,47}$ ]] || die 78 'Invalid PROJECT'
+[[ ${APP_ENV:-} =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die 78 'Invalid APP_ENV'
+[[ ${APP_PORT:-} =~ ^[1-9][0-9]{0,4}$ ]] && (( APP_PORT <= 65535 )) || die 78 'Invalid APP_PORT'
+[[ ${WAIT_SECONDS:-} =~ ^[1-9][0-9]{0,2}$ ]] || die 78 'Invalid WAIT_SECONDS'
+DB_PASSWORD_FILE="$root/secrets/db_password"
+[[ -s $DB_PASSWORD_FILE && -r $DB_PASSWORD_FILE ]] || die 78 'Database password file is missing or empty'
+[[ -x $smoke ]] || die 69 'Smoke script is missing or not executable'
+export APP_ENV APP_PORT DB_PASSWORD_FILE
+url="http://127.0.0.1:$APP_PORT"
+
+check_docker() {
+    timeout 15 docker compose version >/dev/null &&
+        [[ $(timeout 15 docker info --format '{{.OSType}}') == linux ]]
+}
+
+if [[ $operation == check-host ]]; then
+    check_docker || die 69 'Docker Compose and a reachable Linux Docker engine are required'
+    log "Host configuration is valid for $PROJECT on $url"
+    exit 0
+fi
+
+mkdir -p -- "$root/releases"
+exec 9>"$root/operation.lock"
+flock -w 30 9 || die 75 'Another host operation holds the release lock'
+if [[ -e $root/state ]]; then
+    mapfile -t journal < "$root/state"
+    [[ ${#journal[@]} == 3 ]] || die 78 'Invalid release journal'
+    for id in "${journal[@]}"; do
+        [[ $id == - ]] || valid_id "$id" || die 78 'Invalid release journal'
+    done
+    current=${journal[0]}
+    previous=${journal[1]}
+    pending=${journal[2]}
+fi
+
+save_state() {
+    local temp
+    temp=$(mktemp "$root/.state.XXXXXXXX") || return
+    if ! printf '%s\n' "$1" "$2" "$3" > "$temp" || ! sync -f "$temp" ||
+        ! mv -f -- "$temp" "$root/state"; then
+        rm -f -- "$temp"
+        return 1
+    fi
+    sync -f "$root"
+}
+
+compose_bundle() {
+    local bundle=$1 release=$2
+    shift 2
+    local -a images
+    mapfile -t images < "$bundle/images" || return
+    [[ ${#images[@]} == 2 ]] && valid_image "${images[0]}" && valid_image "${images[1]}" || return 1
+    WEB_IMAGE=${images[0]} API_IMAGE=${images[1]} RELEASE_ID=$release         timeout "$((WAIT_SECONDS + 30))" docker compose --ansi never --env-file /dev/null         --project-directory "$bundle" -p "$PROJECT" -f "$bundle/compose.yaml" "$@"
+}
+compose_release() {
+    local release=$1
+    shift
+    compose_bundle "$root/releases/$release" "$release" "$@"
+}
+prefetch() {
+    local release=$1 images image
+    images=$(compose_release "$release" config --images) || return
+    [[ -n $images ]] || return 1
+    while IFS= read -r image; do
+        valid_image "$image" || { log "Unpinned image in release $release"; return 1; }
+        if ! timeout 15 docker image inspect "$image" >/dev/null 2>&1; then
+            timeout 240 docker pull "$image" || return
+        fi
+    done <<< "$images"
+}
+diagnose() {
+    compose_release "$1" ps -a >&2 || true
+    compose_release "$1" logs --no-color --tail 30 >&2 || true
+}
+activate() {
+    local release=$1
+    log "Starting $release"
+    compose_release "$release" up -d --wait --wait-timeout "$WAIT_SECONDS" --no-build --pull never &&
+        "$smoke" "$url" "$release"
+}
+restore() {
+    log "Recovering interrupted or failed activation of $pending"
+    diagnose "$pending"
+    if [[ $current == - ]]; then
+        # Keep the named database volume, including any successfully committed data.
+        compose_release "$pending" down || return
+    else
+        prefetch "$current" && activate "$current" || {
+            diagnose "$current"
+            return 1
+        }
+    fi
+    save_state "$current" "$previous" - || return
+    pending=-
+}
+change_release() {
+    local target=$1
+    prefetch "$target" || die 1 "Image preparation failed for $target"
+    if [[ $target == "$current" ]]; then
+        "$smoke" "$url" "$target" || die 1 "Current release failed verification. Use rollback if available."
+        log "$target is already verified"
+        return
+    fi
+    save_state "$current" "$previous" "$target" || die 2 'Could not record pending release'
+    pending=$target
+    if activate "$target"; then
+        save_state "$target" "$current" - || die 2 'Could not record verified release. Inspect the journal.'
+        log "Verified release $target"
+        return
+    fi
+    if restore; then
+        die 1 "Activation of $target failed. Recovery succeeded."
+    fi
+    die 2 "Activation of $target and recovery both failed. Run recover after correcting the host."
+}
+
+case "$operation" in
+    status)
+        printf 'current=%s\nprevious=%s\npending=%s\n' "$current" "$previous" "$pending"
+        active=$current
+        if [[ $pending != - ]]; then active=$pending; fi
+        if [[ $active != - ]]; then compose_release "$active" ps -a; fi
+        exit
+        ;;
+    logs)
+        active=$current
+        if [[ $pending != - ]]; then active=$pending; fi
+        [[ $active != - ]] || die 1 'No release has been started'
+        compose_release "$active" logs --tail 100 --no-color
+        exit
+        ;;
+esac
+
+check_docker || die 69 'Docker Compose and a reachable Linux Docker engine are required'
+if [[ $operation == recover ]]; then
+    [[ $pending != - ]] || { log 'No interrupted release to recover'; exit 0; }
+    restore || die 2 'Recovery failed. Pending release remains recorded.'
+    exit 0
+fi
+[[ $pending == - ]] || die 75 "Release $pending is pending. Run recover before changing or verifying releases."
+
+case "$operation" in
+    deploy)
+        file=$1 target=$2 web=$3 api=$4
+        bundle="$root/releases/$target"
+        if [[ -d $bundle ]]; then
+            cmp -s -- "$file" "$bundle/compose.yaml" &&
+                cmp -s -- <(printf '%s\n' "$web" "$api") "$bundle/images" ||
+                die 65 "Release $target already exists with different content"
+        else
+            stage=$(mktemp -d "$root/releases/.bundle.XXXXXXXX")
+            cp -- "$file" "$stage/compose.yaml"
+            printf '%s\n' "$web" "$api" > "$stage/images"
+            compose_bundle "$stage" "$target" config --quiet || die 65 'Invalid release Compose file'
+            sync -f "$stage"
+            mv -T -- "$stage" "$bundle"
+            stage=''
+            sync -f "$root/releases"
+        fi
+        change_release "$target"
+        ;;
+    rollback)
+        [[ $previous != - ]] || die 1 'No previously verified release'
+        change_release "$previous"
+        ;;
+    verify)
+        [[ $current != - ]] || die 1 'No verified release'
+        [[ ${1:-$current} == "$current" ]] || die 1 "Expected $1 but journal records $current"
+        "$smoke" "$url" "$current"
+        ;;
+esac

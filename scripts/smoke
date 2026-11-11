@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# != 2 || ! $1 =~ ^https?://[^[:space:]]+$ ]]; then
+    printf 'Usage: smoke URL EXPECTED_RELEASE\n' >&2
+    exit 64
+fi
+url=${1%/}
+release=$2
+note_id=''
+request() {
+    curl --silent --show-error --fail --connect-timeout 3 --max-time 8 "$@"
+}
+cleanup() {
+    if [[ -n $note_id ]]; then
+        request -X DELETE "$url/api/notes/$note_id" >/dev/null ||
+            printf 'Could not clean up smoke note %s\n' "$note_id" >&2
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for endpoint in live ready; do
+    if ! request "$url/health/$endpoint" | jq -e --arg state "$endpoint" '.status == $state' >/dev/null; then
+        printf 'Health check failed at /health/%s\n' "$endpoint" >&2
+        exit 1
+    fi
+done
+
+page=$(request "$url/")
+if [[ $page != *'<title>DeployDock</title>'* ]]; then
+    printf 'Unexpected frontend response\n' >&2
+    exit 1
+fi
+if ! request "$url/api/version" | jq -e --arg release "$release" '.release == $release and (.environment | type == "string" and length > 0)' >/dev/null; then
+    printf 'API did not report expected release %s\n' "$release" >&2
+    exit 1
+fi
+text="DeployDock smoke $(date -u +%s)-$$-$RANDOM"
+note_id=$(request -H 'Content-Type: application/json' -d "$(jq -cn --arg text "$text" '{text:$text}')" "$url/api/notes" |
+    jq -er '.id | select(test("^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"))')
+request "$url/api/notes/$note_id" |
+    jq -e --arg id "$note_id" --arg text "$text" '.id == $id and .text == $text and (.created_at | type == "string")' >/dev/null
+request -X DELETE "$url/api/notes/$note_id" >/dev/null
+note_id=''
+printf 'Smoke passed for %s (frontend, health, version and database write/read/delete).\n' "$release"
