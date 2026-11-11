@@ -5,7 +5,10 @@ set -euo pipefail
     exit 64
 }
 tag=$1
-output=$(docker push "$tag" | tee /dev/stderr)
+status=0
+output=$(docker push "$tag") || status=$?
+printf '%s\n' "$output" >&2
+if (( status != 0 )); then exit "$status"; fi
 digest=$(awk '$2 == "digest:" { print $3 }' <<< "$output")
 [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
     printf 'Docker push did not report an unambiguous manifest digest for %s\n' "$tag" >&2
