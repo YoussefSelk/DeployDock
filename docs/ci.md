@@ -21,7 +21,7 @@ The workflow reads GitHub's current `main` at execution time. It never uses a fo
 
 ## Runner and jobs
 
-Register a dedicated Linux amd64 **project** runner with the shell executor, tag `deploydock-linux` and the protected setting. Install Docker Engine and Compose, Bash, Git, curl, jq, OpenSSL, Python 3.12+ with venv, Node.js, ShellCheck and the OpenSSH client. Allow the runner user to access its dedicated Docker daemon. Shell execution and Docker access confer host-level privileges. Keep this runner dedicated to reviewed changes on protected refs and keep it separate from the target VMs. [Shell executor](https://docs.gitlab.com/runner/executors/shell/)
+Register a dedicated Linux amd64 **project** runner with the shell executor, tag `deploydock-linux` and the protected setting. Install Docker Engine 28 or later and the Compose plugin, Bash, Git, curl, jq, OpenSSL, Python 3.12+ with venv, Node.js, ShellCheck and the OpenSSH client. Allow the runner user to access its dedicated Docker daemon. Shell execution and Docker access confer host-level privileges. Keep this runner dedicated to reviewed changes on protected refs and keep it separate from the target VMs. [Shell executor](https://docs.gitlab.com/runner/executors/shell/)
 
 Install GitLab Runner with its official package, or place the runner executable in a directory the shell job user can traverse. The job user must be able to execute the runner binary for artifact upload and download.
 
@@ -36,6 +36,8 @@ Install GitLab Runner with its official package, or place the runner executable 
 | Production | Manually promote the saved staging manifest |
 
 The build archive expires after one day. The published and staged release manifests expire after 30 days. Keep current and previous tags exempt from registry cleanup for each target. Run a new pipeline if artifacts for a manual promotion have expired.
+
+The push helper publishes the tested Linux amd64 manifest. This keeps the executable image and its Git revision label and avoids a GitLab registry compatibility issue with BuildKit attestation indexes. [Docker image push](https://docs.docker.com/reference/cli/docker/image/push/) · [GitLab registry support note](https://support.gitlab.com/hc/en-us/articles/29426166749596-Push-to-Container-Registry-Fails-Error-error-from-registry-blob-unknown-to-registry)
 
 ## Enable deployment
 
