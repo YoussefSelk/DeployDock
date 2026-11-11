@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+/secrets/
+/.deploydock/
+__pycache__/
+.venv/
+.cache/
+.ansible/
+*.retry
