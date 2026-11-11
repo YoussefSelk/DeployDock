@@ -5,4 +5,4 @@ COPY app/backend/requirements.txt .
 RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.txt
 COPY app/backend/api.py app/backend/bootstrap.py app/backend/schema.sql ./
 USER 10001:10001
-CMD ["sh", "-c", "python bootstrap.py && exec gunicorn --bind 0.0.0.0:8000 --worker-class gthread --workers 2 --threads 2 --timeout 15 --access-logfile - --access-logformat '%(m)s %(U)s %(s)s %(L)s' api:app"]
+CMD ["sh", "-c", "python bootstrap.py && exec gunicorn --bind 0.0.0.0:8000 --no-control-socket --worker-class gthread --workers 2 --threads 2 --timeout 15 --access-logfile - --access-logformat '%(m)s %(U)s %(s)s %(L)s' api:app"]
