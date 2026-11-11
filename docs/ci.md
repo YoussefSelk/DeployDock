@@ -23,6 +23,8 @@ The workflow reads GitHub's current `main` at execution time. It never uses a fo
 
 Register a dedicated Linux amd64 **project** runner with the shell executor, tag `deploydock-linux` and the protected setting. Install Docker Engine and Compose, Bash, Git, curl, jq, OpenSSL, Python 3.12+ with venv, Node.js, ShellCheck and the OpenSSH client. Allow the runner user to access its dedicated Docker daemon. Shell execution and Docker access confer host-level privileges. Keep this runner dedicated to reviewed changes on protected refs and keep it separate from the target VMs. [Shell executor](https://docs.gitlab.com/runner/executors/shell/)
 
+Install GitLab Runner with its official package, or place the runner executable in a directory the shell job user can traverse. The job user must be able to execute the runner binary for artifact upload and download.
+
 | Stage | Job behavior |
 | --- | --- |
 | Validate | ShellCheck, Bash and JS syntax, Compose config, Ansible syntax and lint |
