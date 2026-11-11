@@ -23,6 +23,7 @@ label { display: block; font-weight: 600; margin-bottom: 8px; }
 .controls { display: flex; gap: 8px; flex-wrap: wrap; }
 input { background: #f0f0f0; border: 3px solid #000; color: #000; padding: 8px; flex: 1 1 220px; min-width: 0; }
 button { background: #000; color: #fff; border: 3px solid #000; padding: 8px 16px; text-transform: uppercase; cursor: pointer; }
+input, button { border-radius: 0; }
 button:hover:not(:disabled) { background: #fff; color: #000; }
 button:disabled { border-color: #ccc; background: #f0f0f0; color: #000; cursor: wait; }
 :focus-visible { outline: 3px solid #000; outline-offset: 4px; }
