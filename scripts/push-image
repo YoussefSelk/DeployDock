@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && $1 =~ ^[a-z0-9][a-z0-9._:/-]*:[a-zA-Z0-9._-]+$ ]] || {
+    printf 'Usage: push-image REGISTRY/REPOSITORY:TAG\n' >&2
+    exit 64
+}
+tag=$1
+output=$(docker push "$tag" | tee /dev/stderr)
+digest=$(awk '$2 == "digest:" { print $3 }' <<< "$output")
+[[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    printf 'Docker push did not report an unambiguous manifest digest for %s\n' "$tag" >&2
+    exit 1
+}
+printf '%s@%s\n' "${tag%:*}" "$digest"
