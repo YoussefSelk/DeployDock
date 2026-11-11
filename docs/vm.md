@@ -47,7 +47,7 @@ The deploy account uses key-only SSH and cannot forward connections or allocate 
 
 ## Publish and deploy
 
-Use the GitLab pipeline to publish images and retain its `release.env` report. For a manual release, use the following commands from a clean, committed checkout on an amd64 Linux Docker host. Set `REGISTRY_REPOSITORY` to your registry's project path such as `registry.gitlab.com/your-group/deploydock`, and log in as a publisher via `docker login`. Use a unique `RELEASE_ID` per build.
+Use the GitLab pipeline to publish images and retain its `release.json` artifact. For a manual release, use the following commands from a clean, committed checkout on an amd64 Linux Docker host. Set `REGISTRY_REPOSITORY` to your registry's project path such as `registry.gitlab.com/your-group/deploydock`, and log in as a publisher via `docker login`. Use a unique `RELEASE_ID` per build.
 
 ```bash
 : "${REGISTRY_REPOSITORY:?Set the registry project path}"

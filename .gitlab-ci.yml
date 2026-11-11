@@ -11,8 +11,6 @@ default:
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-  CI_WEB_TAG: "deploydock-ci/web:$CI_PIPELINE_ID"
-  CI_API_TAG: "deploydock-ci/api:$CI_PIPELINE_ID"
 
 .python_job:
   cache:
@@ -41,24 +39,33 @@ unit:
 build_images:
   stage: build
   script:
-    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$CI_WEB_TAG" -f app/frontend/Dockerfile .
-    - docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$CI_API_TAG" -f app/backend/Dockerfile .
-    - set -o pipefail
-    - docker image save "$CI_WEB_TAG" "$CI_API_TAG" | gzip -1 > images.tar.gz
+    - |
+      set -euo pipefail
+      web_tag="deploydock-ci/web:$CI_JOB_ID"
+      api_tag="deploydock-ci/api:$CI_JOB_ID"
+      docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$web_tag" -f app/frontend/Dockerfile .
+      docker build --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" -t "$api_tag" -f app/backend/Dockerfile .
+      docker image save "$web_tag" "$api_tag" | gzip -1 > images.tar.gz
+      printf '%s\n' "$web_tag" "$api_tag" > image-tags
   after_script:
-    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" || true
+    - docker image rm "deploydock-ci/web:$CI_JOB_ID" "deploydock-ci/api:$CI_JOB_ID" || true
   artifacts:
-    paths: [images.tar.gz]
+    paths: [images.tar.gz, image-tags]
     expire_in: 1 day
 
 integration:
   stage: integration
   needs: [build_images]
   script:
+    - mapfile -t image_tags < image-tags
     - docker image load -i images.tar.gz
-    - tests/integration/release.sh "$CI_WEB_TAG" "$CI_API_TAG"
+    - tests/integration/release.sh "${image_tags[0]}" "${image_tags[1]}"
+    - sha256sum images.tar.gz image-tags > tested-images.sha256
   after_script:
-    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" || true
+    - if mapfile -t image_tags < image-tags; then docker image rm "${image_tags[@]}" || true; fi
+  artifacts:
+    paths: [tested-images.sha256]
+    expire_in: 1 day
 
 publish:
   stage: publish
@@ -66,7 +73,7 @@ publish:
     - job: build_images
       artifacts: true
     - job: integration
-      artifacts: false
+      artifacts: true
   script:
     - |
       set -euo pipefail
@@ -74,29 +81,29 @@ publish:
       export DOCKER_CONFIG
       DOCKER_CONFIG=$(mktemp -d /tmp/deploydock-registry.XXXXXXXX)
       trap 'rm -f -- "$DOCKER_CONFIG/config.json"; rmdir -- "$DOCKER_CONFIG"' EXIT
-      release="$CI_COMMIT_SHA-$CI_PIPELINE_ID"
+      release="$CI_COMMIT_SHA-$CI_PIPELINE_ID-$CI_JOB_ID"
       web_tag="$CI_REGISTRY_IMAGE/web:$release"
       api_tag="$CI_REGISTRY_IMAGE/api:$release"
+      sha256sum --check tested-images.sha256
+      mapfile -t image_tags < image-tags
       docker image load -i images.tar.gz
-      docker tag "$CI_WEB_TAG" "$web_tag"
-      docker tag "$CI_API_TAG" "$api_tag"
+      docker tag "${image_tags[0]}" "$web_tag"
+      docker tag "${image_tags[1]}" "$api_tag"
       printf '%s' "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
       web=$(scripts/push-image "$web_tag")
       api=$(scripts/push-image "$api_tag")
-      printf 'RELEASE_ID=%s\nWEB_IMAGE=%s\nAPI_IMAGE=%s\n' "$release" "$web" "$api" > release.env
+      jq -n --arg release "$release" --arg web "$web" --arg api "$api" \
+        '{deploydock_release:$release,deploydock_web_image:$web,deploydock_api_image:$api}' > release.json
   after_script:
-    - docker image rm "$CI_WEB_TAG" "$CI_API_TAG" "$CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHA-$CI_PIPELINE_ID" "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHA-$CI_PIPELINE_ID" || true
+    - if mapfile -t image_tags < image-tags; then docker image rm "${image_tags[@]}" || true; fi
+    - docker image rm "$CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHA-$CI_PIPELINE_ID-$CI_JOB_ID" "$CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHA-$CI_PIPELINE_ID-$CI_JOB_ID" || true
   artifacts:
-    reports:
-      dotenv: release.env
+    paths: [release.json]
     expire_in: 30 days
 
 .deploy:
   extends: .python_job
   interruptible: false
-  script:
-    - pip install -q -r ci/controller-requirements.txt
-    - ci/deploy
 
 staging:
   extends: .deploy
@@ -104,15 +111,25 @@ staging:
   needs: [publish]
   resource_group: deploydock-staging
   environment: staging
+  script:
+    - pip install -q -r ci/controller-requirements.txt
+    - ci/deploy release.json
+    - cp release.json staged-release.json
+  artifacts:
+    paths: [staged-release.json]
+    expire_in: 30 days
   rules:
     - if: '$DEPLOYDOCK_STAGING_ENABLED == "true"'
 
 production:
   extends: .deploy
   stage: production
-  needs: [publish, staging]
+  needs: [staging]
   resource_group: deploydock-production
   environment: production
+  script:
+    - pip install -q -r ci/controller-requirements.txt
+    - ci/deploy staged-release.json
   rules:
     - if: '$DEPLOYDOCK_STAGING_ENABLED == "true" && $DEPLOYDOCK_PRODUCTION_ENABLED == "true"'
       when: manual

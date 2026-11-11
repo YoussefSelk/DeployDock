@@ -1,6 +1,6 @@
 # GitHub and GitLab CI
 
-GitHub `main` is the canonical branch. The bridge workflow performs a normal fast-forward Git push to GitLab. A push creates a GitLab pipeline on the same commit, and GitLab owns validation, image build, publication, staging and promotion. This works with a normal GitLab Free project. GitLab's dedicated external-repository integration and pull mirroring are separate paid-tier options. [External-repository CI/CD](https://docs.gitlab.com/ci/ci_cd_for_external_repos/) · [GitLab pipeline sources](https://docs.gitlab.com/ci/pipelines/)
+The public GitHub repository is the canonical source and `main` is the synchronized branch. The bridge clones that source anonymously. The bridge workflow performs a normal fast-forward Git push to GitLab. A push creates a GitLab pipeline on the same commit, and GitLab owns validation, image build, publication, staging and promotion. This works with a normal GitLab Free project. GitLab's dedicated external-repository integration and pull mirroring are separate paid-tier options. [External-repository CI/CD](https://docs.gitlab.com/ci/ci_cd_for_external_repos/) · [GitLab pipeline sources](https://docs.gitlab.com/ci/pipelines/)
 
 ## Set up synchronization
 
@@ -28,12 +28,12 @@ Register a dedicated Linux amd64 **project** runner with the shell executor, tag
 | Validate | ShellCheck, Bash and JS syntax, Compose config, Ansible syntax and lint |
 | Test | API contract and release input tests |
 | Build | Build both images with the commit SHA label and save an image archive |
-| Integration | Load the exact archive and run a real Compose deployment and recovery suite |
-| Publish | Load the same images, push to the GitLab registry with job credentials and export manifest digests |
-| Staging | Apply and verify the published release via Ansible, with host-side recovery on failure |
-| Production | Manually promote the same digests after successful staging |
+| Integration | Load the exact archive and run a real Compose deployment and recovery suite, then record the archive checksum |
+| Publish | Check the tested archive checksum, push to the GitLab registry with job credentials and export a release manifest |
+| Staging | Apply and verify the published release via Ansible, then save the manifest that passed staging |
+| Production | Manually promote the saved staging manifest |
 
-The build archive expires after one day. The digest report expires after 30 days. Keep current and previous tags exempt from registry cleanup for each target. Run a new pipeline if artifacts for a manual promotion have expired.
+The build archive expires after one day. The published and staged release manifests expire after 30 days. Keep current and previous tags exempt from registry cleanup for each target. Run a new pipeline if artifacts for a manual promotion have expired.
 
 ## Enable deployment
 
@@ -44,7 +44,7 @@ Provision separate staging and production-like VMs before enabling deployment. S
 | `DEPLOY_HOST` | Reachable target DNS name or IPv4 address |
 | `DEPLOY_SSH_PORT` | Optional SSH port, defaults to 22 |
 | `DEPLOY_SSH_USER` | Optional account name, defaults to `deploydock` |
-| `DEPLOY_SSH_PRIVATE_KEY` | File variable containing the environment's dedicated key, with trailing newline |
+| `DEPLOY_SSH_PRIVATE_KEY` | File variable containing the environment's dedicated unencrypted deploy key, with trailing newline |
 | `DEPLOY_SSH_KNOWN_HOSTS` | File variable with host keys verified out-of-band |
 
 The runner uses batch mode and strict host key checking. The root Docker client on each VM uses its own read-only registry credentials. GitLab's publish job uses temporary Docker client configuration and `--password-stdin`. Keep CI debug tracing disabled. [GitLab registry authentication](https://docs.gitlab.com/user/packages/container_registry/authenticate_with_container_registry/)
