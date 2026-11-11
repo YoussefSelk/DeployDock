@@ -68,7 +68,11 @@ api_a=$(scripts/push-image "$registry/api:a")
 api_b=$(scripts/push-image "$registry/api:b")
 [[ $api_a != "$api_b" ]]
 
-sed 's/^      RELEASE_ID:.*/      RELEASE_ID: incorrect-runtime-version/' compose.yaml > "$root/bad-smoke.yaml"
+# Compose resolves the candidate-only service image at runtime.
+# shellcheck disable=SC2016
+sed -e 's/^      RELEASE_ID:.*/      RELEASE_ID: incorrect-runtime-version/' \
+    -e '/^networks:/i\  candidate_only:\n    image: ${API_IMAGE}\n    command: ["sleep", "300"]\n    networks: [edge]' \
+    compose.yaml > "$root/bad-smoke.yaml"
 sed '/^  api:$/a\    command: ["sh", "-c", "exit 1"]' compose.yaml > "$root/unready.yaml"
 
 scripts/deploydock check-host
@@ -92,7 +96,13 @@ check_api_image() {
 scripts/deploydock deploy compose.yaml good-b "$web" "$api_b"
 check_api_image "$api_b"
 check_note
-expect_exit 1 scripts/deploydock deploy "$root/bad-smoke.yaml" bad-smoke "$web" "$api_a"
+failure_log=$(expect_exit 1 scripts/deploydock deploy "$root/bad-smoke.yaml" bad-smoke "$web" "$api_a" 2>&1)
+printf '%s\n' "$failure_log"
+[[ $failure_log == *'API did not report expected release bad-smoke'* ]]
+if [[ -n $(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter label=com.docker.compose.service=candidate_only) ]]; then
+    printf 'A candidate-only service survived restoration.\n' >&2
+    exit 1
+fi
 [[ $(cat "$root/state") == $'good-b\ngood-a\n-' ]]
 scripts/deploydock verify good-b
 check_api_image "$api_b"

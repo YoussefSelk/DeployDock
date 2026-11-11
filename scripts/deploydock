@@ -151,7 +151,7 @@ diagnose() {
 activate() {
     local release=$1
     log "Starting $release"
-    compose_release "$release" up -d --wait --wait-timeout "$WAIT_SECONDS" --no-build --pull never &&
+    compose_release "$release" up -d --wait --wait-timeout "$WAIT_SECONDS" --no-build --pull never --remove-orphans &&
         "$smoke" "$url" "$release"
 }
 restore() {
@@ -159,7 +159,7 @@ restore() {
     diagnose "$pending"
     if [[ $current == - ]]; then
         # Keep the named database volume, including any successfully committed data.
-        compose_release "$pending" down || return
+        compose_release "$pending" down --remove-orphans || return
     elif ! prefetch "$current" || ! activate "$current"; then
         diagnose "$current"
         return 1
