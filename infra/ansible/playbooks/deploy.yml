@@ -1,0 +1,60 @@
+---
+- name: Activate and verify a DeployDock release
+  hosts: deploydock
+  serial: 1
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate release input
+      ansible.builtin.assert:
+        that:
+          - deploydock_release is defined
+          - deploydock_web_image is defined
+          - deploydock_api_image is defined
+          - deploydock_release is match('^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}\Z')
+          - deploydock_web_image is match('^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}\Z')
+          - deploydock_api_image is match('^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}\Z')
+
+    - name: Allocate private incoming release directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: deploydock-
+      register: deploydock_incoming
+      changed_when: false
+
+    - name: Deploy the release
+      block:
+        - name: Upload release Compose specification
+          ansible.builtin.copy:
+            src: "{{ deploydock_compose_source | default(playbook_dir ~ '/../../../compose.yaml') }}"
+            dest: "{{ deploydock_incoming.path }}/compose.yaml"
+            mode: "0600"
+          changed_when: false
+
+        - name: Apply release transaction
+          ansible.builtin.command:
+            argv:
+              - /usr/local/bin/deploydock
+              - deploy
+              - "{{ deploydock_incoming.path }}/compose.yaml"
+              - "{{ deploydock_release }}"
+              - "{{ deploydock_web_image }}"
+              - "{{ deploydock_api_image }}"
+          register: deploydock_result
+          changed_when: "'Verified release ' in deploydock_result.stderr"
+          failed_when: false
+
+        - name: Print activation and validation results
+          ansible.builtin.debug:
+            msg: "{{ deploydock_result.stdout_lines + deploydock_result.stderr_lines }}"
+
+        - name: Require successful verified deployment
+          ansible.builtin.assert:
+            that: deploydock_result.rc == 0
+            fail_msg: "Release transaction failed with exit {{ deploydock_result.rc }}. Inspect the activation log above."
+      always:
+        - name: Clean incoming release directory
+          ansible.builtin.file:
+            path: "{{ deploydock_incoming.path }}"
+            state: absent
+          changed_when: false

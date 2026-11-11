@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 root=${DEPLOYDOCK_ROOT:-/opt/deploydock}
-smoke="$(dirname -- "${BASH_SOURCE[0]}")/smoke"
+smoke="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/smoke"
 operation=${1:-help}
 stage=''
 current=-
@@ -51,7 +51,9 @@ case "$operation" in
         [[ $# == 4 ]] || die 64 'deploy requires Compose file, release ID and two image references'
         [[ -f $1 && -r $1 ]] || die 64 'Compose file is missing or unreadable'
         valid_id "$2" || die 64 'Invalid release ID'
-        valid_image "$3" && valid_image "$4" || die 64 'Images must be digest-qualified'
+        if ! valid_image "$3" || ! valid_image "$4"; then
+            die 64 'Images must be digest-qualified'
+        fi
         ;;
     verify)
         [[ $# -le 1 ]] || die 64 'verify accepts at most one release ID'
@@ -72,7 +74,9 @@ done
 source "$root/host.env"
 [[ ${PROJECT:-} =~ ^[a-z0-9][a-z0-9_-]{0,47}$ ]] || die 78 'Invalid PROJECT'
 [[ ${APP_ENV:-} =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die 78 'Invalid APP_ENV'
-[[ ${APP_PORT:-} =~ ^[1-9][0-9]{0,4}$ ]] && (( APP_PORT <= 65535 )) || die 78 'Invalid APP_PORT'
+if ! [[ ${APP_PORT:-} =~ ^[1-9][0-9]{0,4}$ ]] || (( APP_PORT > 65535 )); then
+    die 78 'Invalid APP_PORT'
+fi
 [[ ${WAIT_SECONDS:-} =~ ^[1-9][0-9]{0,2}$ ]] || die 78 'Invalid WAIT_SECONDS'
 DB_PASSWORD_FILE="$root/secrets/db_password"
 [[ -s $DB_PASSWORD_FILE && -r $DB_PASSWORD_FILE ]] || die 78 'Database password file is missing or empty'
@@ -156,11 +160,9 @@ restore() {
     if [[ $current == - ]]; then
         # Keep the named database volume, including any successfully committed data.
         compose_release "$pending" down || return
-    else
-        prefetch "$current" && activate "$current" || {
-            diagnose "$current"
-            return 1
-        }
+    elif ! prefetch "$current" || ! activate "$current"; then
+        diagnose "$current"
+        return 1
     fi
     save_state "$current" "$previous" - || return
     pending=-
@@ -216,9 +218,10 @@ case "$operation" in
         file=$1 target=$2 web=$3 api=$4
         bundle="$root/releases/$target"
         if [[ -d $bundle ]]; then
-            cmp -s -- "$file" "$bundle/compose.yaml" &&
-                cmp -s -- <(printf '%s\n' "$web" "$api") "$bundle/images" ||
+            if ! cmp -s -- "$file" "$bundle/compose.yaml" ||
+                ! cmp -s -- <(printf '%s\n' "$web" "$api") "$bundle/images"; then
                 die 65 "Release $target already exists with different content"
+            fi
         else
             stage=$(mktemp -d "$root/releases/.bundle.XXXXXXXX")
             cp -- "$file" "$stage/compose.yaml"

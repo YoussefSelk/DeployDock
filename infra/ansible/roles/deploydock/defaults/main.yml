@@ -1,0 +1,16 @@
+---
+deploydock_user: deploydock
+deploydock_authorized_keys: []
+deploydock_environment: staging
+deploydock_project: deploydock
+deploydock_port: 8080
+deploydock_wait_seconds: 90
+deploydock_manage_firewall: false
+deploydock_ssh_sources: []
+deploydock_ssh_port: 22
+deploydock_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin

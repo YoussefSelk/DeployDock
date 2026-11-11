@@ -1,0 +1,6 @@
+---
+- name: Provision DeployDock hosts
+  hosts: deploydock
+  become: true
+  roles:
+    - deploydock

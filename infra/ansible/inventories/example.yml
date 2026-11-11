@@ -1,0 +1,13 @@
+---
+all:
+  vars:
+    ansible_user: ubuntu
+  children:
+    deploydock:
+      hosts:
+        stage:
+          ansible_host: staging.example.invalid
+          deploydock_environment: staging
+        prod:
+          ansible_host: production.example.invalid
+          deploydock_environment: production

@@ -1,0 +1,208 @@
+---
+- name: Validate host and inventory
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version == '24.04'
+      - ansible_facts.architecture == 'x86_64'
+      - ansible_facts.service_mgr == 'systemd'
+      - deploydock_user is match('^[a-z][a-z0-9_-]{0,31}$')
+      - deploydock_user != 'root'
+      - deploydock_environment is match('^[a-z][a-z0-9-]{0,31}$')
+      - deploydock_project is match('^[a-z0-9][a-z0-9_-]{0,47}$')
+      - deploydock_port | string is match('^[1-9][0-9]{0,4}$')
+      - deploydock_port | int <= 65535
+      - deploydock_wait_seconds | string is match('^[1-9][0-9]{0,2}$')
+      - deploydock_authorized_keys is sequence
+      - deploydock_authorized_keys is not string
+      - deploydock_authorized_keys | length > 0
+      - not deploydock_manage_firewall or deploydock_ssh_sources | length > 0
+    fail_msg: Use Ubuntu 24.04 amd64 with systemd and configure at least one deploy SSH public key.
+
+- name: Validate each deploy SSH public key
+  ansible.builtin.assert:
+    that:
+      - >-
+        item is match('^ssh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]+)?\Z')
+  loop: "{{ deploydock_authorized_keys }}"
+
+- name: Install host prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - jq
+      - openssl
+      - openssh-server
+      - python3-debian
+      - sudo
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create APT keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Docker signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    checksum: sha256:1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure official Docker APT source
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: noble
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.asc
+  register: deploydock_docker_repository
+
+- name: Install Docker Engine and plugins
+  ansible.builtin.apt:
+    name: "{{ deploydock_docker_packages }}"
+    update_cache: "{{ deploydock_docker_repository.changed }}"
+    state: present
+
+- name: Enable and start Docker Engine
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Ensure SSH is enabled and running
+  ansible.builtin.service:
+    name: ssh
+    enabled: true
+    state: started
+
+- name: Create a dedicated deployment account
+  ansible.builtin.user:
+    name: "{{ deploydock_user }}"
+    create_home: true
+    shell: /bin/bash
+    password_lock: true
+
+- name: Install deployment public keys
+  ansible.posix.authorized_key:
+    user: "{{ deploydock_user }}"
+    key: "{{ deploydock_authorized_keys | join('\n') }}"
+    key_options: restrict
+    exclusive: true
+
+- name: Require public-key authentication for the deployment account
+  ansible.builtin.blockinfile:
+    path: /etc/ssh/sshd_config
+    marker: "# {mark} ANSIBLE MANAGED DEPLOYDOCK"
+    insertafter: EOF
+    block: |
+      Match User {{ deploydock_user }}
+          AuthenticationMethods publickey
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          DisableForwarding yes
+          PermitTTY no
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload SSH
+
+- name: Authorize the deployment account to run trusted Ansible playbooks
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-deploydock
+    content: "{{ deploydock_user }} ALL=(root) NOPASSWD: ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Create application directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /opt/deploydock
+    - /opt/deploydock/releases
+    - /opt/deploydock/secrets
+
+- name: Inspect database password file
+  ansible.builtin.stat:
+    path: /opt/deploydock/secrets/db_password
+  register: deploydock_database_password
+
+- name: Initialize database password once
+  when: not deploydock_database_password.stat.exists and not ansible_check_mode
+  no_log: true
+  block:
+    - name: Generate a random database password
+      ansible.builtin.command: openssl rand -hex 32
+      register: deploydock_generated_password
+      changed_when: false
+
+    - name: Store database password for Compose
+      ansible.builtin.copy:
+        dest: /opt/deploydock/secrets/db_password
+        content: "{{ deploydock_generated_password.stdout }}\n"
+        force: false
+        owner: root
+        group: root
+        mode: "0444"
+
+- name: Enforce password file permissions
+  ansible.builtin.file:
+    path: /opt/deploydock/secrets/db_password
+    owner: root
+    group: root
+    mode: "0444"
+  when: not ansible_check_mode or deploydock_database_password.stat.exists
+
+- name: Install host settings
+  ansible.builtin.template:
+    src: host.env.j2
+    dest: /opt/deploydock/host.env
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Create host operations directory
+  ansible.builtin.file:
+    path: /usr/local/lib/deploydock
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install release controller and smoke test
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../../scripts/{{ item }}"
+    dest: "/usr/local/lib/deploydock/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [deploydock, smoke]
+
+- name: Link release controller into PATH
+  ansible.builtin.file:
+    src: /usr/local/lib/deploydock/deploydock
+    path: /usr/local/bin/deploydock
+    state: link
+    owner: root
+    group: root
+
+- name: Configure optional host firewall
+  ansible.builtin.import_tasks: firewall.yml
+  when: deploydock_manage_firewall | bool
+
+- name: Verify the host is ready for releases
+  ansible.builtin.command: /usr/local/bin/deploydock check-host
+  changed_when: false

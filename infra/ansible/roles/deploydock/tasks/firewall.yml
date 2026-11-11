@@ -1,0 +1,22 @@
+---
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+- name: Allow SSH from management networks before enabling firewall
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+    port: "{{ deploydock_ssh_port | string }}"
+    proto: tcp
+  loop: "{{ deploydock_ssh_sources }}"
+
+- name: Set default incoming policy
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
